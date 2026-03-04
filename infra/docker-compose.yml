@@ -1,0 +1,42 @@
+services:
+  mysql:
+    image: docker.1ms.run/mysql:8.0
+    container_name: mall-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: mall_order
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: docker.1ms.run/redis:7
+    container_name: mall-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+  nacos:
+    image: docker.1ms.run/nacos/nacos-server:v2.3.2
+    container_name: mall-nacos
+    restart: unless-stopped
+    environment:
+      MODE: standalone
+      TZ: Asia/Shanghai
+      NACOS_AUTH_ENABLE: "false"
+    ports:
+      - "8848:8848"
+
+volumes:
+  mysql_data:
+  redis_data:
