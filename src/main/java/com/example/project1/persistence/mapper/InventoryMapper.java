@@ -30,6 +30,23 @@ public interface InventoryMapper {
     InventoryEntity selectBySkuCode(String skuCode);
 
     /**
+     * 通过SKU查询库存并加行级锁。
+     *
+     * 在事务内调用该方法可确保同一SKU并发下单时串行修改，
+     * 使库存快照与流水记录保持一致。
+     *
+     * @param skuCode 标识产品变体的唯一SKU代码
+     * @return 如果找到则返回{@link InventoryEntity}，否则返回{@code null}
+     */
+    @Select("""
+        SELECT id, sku_code, available_qty, locked_qty, version, created_at, updated_at
+        FROM t_inventory
+        WHERE sku_code = #{skuCode}
+        FOR UPDATE
+        """)
+    InventoryEntity selectBySkuCodeForUpdate(String skuCode);
+
+    /**
      * 扣减可用库存以防止超卖。
      *
      * 此方法原子地减少可用数量，仅在存在足够库存时才会更新。它使用条件更新以确保操作在库存不足时失败，防止负库存水平。

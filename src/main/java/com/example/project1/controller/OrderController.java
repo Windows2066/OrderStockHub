@@ -1,5 +1,6 @@
 package com.example.project1.controller;
 
+import com.example.project1.common.ApiResponse;
 import com.example.project1.dto.CreateOrderRequest;
 import com.example.project1.persistence.model.OrderEntity;
 import com.example.project1.service.OrderService;
@@ -42,12 +43,11 @@ public class OrderController {
      * 该接口会触发：创建订单、扣减库存、记录库存流水。
      *
      * @param request 下单请求参数
-     * @return 创建成功后的订单主记录
+     * @return 统一响应格式，data 为创建成功后的订单主记录
      */
     @PostMapping
-    public ResponseEntity<OrderEntity> createOrder(@Valid @RequestBody CreateOrderRequest request) {
+    public ResponseEntity<ApiResponse<OrderEntity>> createOrder(@Valid @RequestBody CreateOrderRequest request) {
         OrderEntity order = orderService.createOrder(request);
-        return ResponseEntity.ok(order);
+        return ResponseEntity.ok(ApiResponse.success(order));
     }
 }
-

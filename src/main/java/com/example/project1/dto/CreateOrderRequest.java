@@ -2,6 +2,7 @@ package com.example.project1.dto;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -21,6 +22,7 @@ public class CreateOrderRequest {
      * 下单用户ID。
      */
     @NotNull(message = "userId不能为空")
+    @Min(value = 1, message = "userId必须大于等于1")
     private Long userId;
 
     /**
@@ -59,6 +61,7 @@ public class CreateOrderRequest {
          * 该项目中会转换为库存SKU：SKU-商品ID。
          */
         @NotNull(message = "productId不能为空")
+        @Min(value = 1, message = "productId必须大于等于1")
         private Long productId;
 
         /**
@@ -69,10 +72,11 @@ public class CreateOrderRequest {
         private Integer quantity;
 
         /**
-         * 下单单价，必须大于0。
+         * 下单单价，必须大于0，且最多保留两位小数。
          */
         @NotNull(message = "price不能为空")
         @DecimalMin(value = "0.01", message = "price必须大于0")
+        @Digits(integer = 16, fraction = 2, message = "price最多16位整数且最多2位小数")
         private BigDecimal price;
 
         public Long getProductId() {
@@ -100,4 +104,3 @@ public class CreateOrderRequest {
         }
     }
 }
-

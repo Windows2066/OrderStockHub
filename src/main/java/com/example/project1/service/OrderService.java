@@ -1,6 +1,7 @@
 package com.example.project1.service;
 
 import com.example.project1.dto.CreateOrderRequest;
+import com.example.project1.exception.BusinessException;
 import com.example.project1.persistence.mapper.InventoryLogMapper;
 import com.example.project1.persistence.mapper.InventoryMapper;
 import com.example.project1.persistence.mapper.OrderItemMapper;
@@ -14,7 +15,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 订单业务服务。
@@ -70,27 +73,15 @@ public class OrderService {
      */
     @Transactional(rollbackFor = Exception.class)
     public OrderEntity createOrder(CreateOrderRequest request) {
-        // 业务订单号：这里采用时间戳简化实现，便于本地联调。
-        String orderNo = "ORD" + System.currentTimeMillis();
+        // 业务订单号采用 UUID，避免高并发下毫秒时间戳重复。
+        String orderNo = "ORD" + UUID.randomUUID().toString().replace("-", "");
 
         // 汇总订单总金额 = sum(单价 * 数量)。
         BigDecimal totalAmount = request.getItems().stream()
                 .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 先做库存预检查，尽量在写订单前提前失败，减少无效写入。
-        for (CreateOrderRequest.OrderItemRequest item : request.getItems()) {
-            String skuCode = buildSkuCode(item.getProductId());
-            InventoryEntity inventory = inventoryMapper.selectBySkuCode(skuCode);
-            if (inventory == null) {
-                throw new RuntimeException("商品" + skuCode + "库存不存在");
-            }
-            if (inventory.getAvailableQty() < item.getQuantity()) {
-                throw new RuntimeException("商品" + skuCode + "库存不足");
-            }
-        }
-
-        // 写入订单主表。
+        // 先写入订单主表。
         OrderEntity order = new OrderEntity();
         order.setOrderNo(orderNo);
         order.setUserId(request.getUserId());
@@ -112,16 +103,29 @@ public class OrderService {
         }
         orderItemMapper.batchInsert(orderItems);
 
+        // 为降低多SKU并发死锁概率，按 productId 升序处理库存扣减。
+        List<CreateOrderRequest.OrderItemRequest> sortedItems = new ArrayList<>(request.getItems());
+        sortedItems.sort(Comparator.comparing(CreateOrderRequest.OrderItemRequest::getProductId));
+
         // 逐项扣库存并写库存流水，确保每个SKU都有可追溯记录。
-        for (CreateOrderRequest.OrderItemRequest item : request.getItems()) {
+        for (CreateOrderRequest.OrderItemRequest item : sortedItems) {
             String skuCode = buildSkuCode(item.getProductId());
-            InventoryEntity inventory = inventoryMapper.selectBySkuCode(skuCode);
+
+            // 在事务中对库存行加锁，保证读取快照与后续扣减一致。
+            InventoryEntity inventory = inventoryMapper.selectBySkuCodeForUpdate(skuCode);
+            if (inventory == null) {
+                throw new BusinessException(4101, "商品" + skuCode + "库存不存在");
+            }
+            if (inventory.getAvailableQty() < item.getQuantity()) {
+                throw new BusinessException(4102, "商品" + skuCode + "库存不足");
+            }
+
             int beforeQty = inventory.getAvailableQty();
 
             // 条件更新扣库存：仅在available_qty足够时扣减成功。
             int updated = inventoryMapper.deductAvailable(skuCode, item.getQuantity());
             if (updated == 0) {
-                throw new RuntimeException("商品" + skuCode + "扣库存失败");
+                throw new BusinessException(4102, "商品" + skuCode + "库存不足");
             }
 
             // 写库存流水。change_qty按表设计使用正数，变更方向由change_type表达。
@@ -149,4 +153,3 @@ public class OrderService {
         return "SKU-" + productId;
     }
 }
-

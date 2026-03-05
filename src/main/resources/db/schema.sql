@@ -22,7 +22,13 @@ CREATE TABLE IF NOT EXISTS t_order (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- 记录最后更新时间
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- 常用查询索引：按用户维度查看订单列表
+    INDEX idx_user_id (user_id),
+
+    -- 常用查询索引：按创建时间倒序分页
+    INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ------------------------------------------------------------
@@ -54,7 +60,10 @@ CREATE TABLE IF NOT EXISTS t_order_item (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     -- 常用查询索引：通过订单ID查询订单行
-    INDEX idx_order_id (order_id)
+    INDEX idx_order_id (order_id),
+
+    -- 常用查询索引：通过SKU统计销量或回溯订单
+    INDEX idx_sku_code (sku_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ------------------------------------------------------------
@@ -115,7 +124,13 @@ CREATE TABLE IF NOT EXISTS t_inventory_log (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- 幂等约束：同一业务号 + SKU + 类型只能写入一次
-    UNIQUE KEY uk_biz_sku_type (biz_no, sku_code, change_type)
+    UNIQUE KEY uk_biz_sku_type (biz_no, sku_code, change_type),
+
+    -- 常用查询索引：按业务号追踪一次下单产生的所有库存流水
+    INDEX idx_biz_no (biz_no),
+
+    -- 常用查询索引：按SKU查看历史变更
+    INDEX idx_sku_code (sku_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ------------------------------------------------------------
