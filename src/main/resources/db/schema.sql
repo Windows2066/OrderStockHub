@@ -1,4 +1,3 @@
-
 -- ------------------------------------------------------------
 -- 订单主表：保存订单头信息（谁下单、订单号、状态、总金额）
 -- ------------------------------------------------------------
@@ -8,6 +7,9 @@ CREATE TABLE IF NOT EXISTS t_order (
 
     -- 业务订单号，面向业务系统流转，必须唯一
     order_no VARCHAR(64) NOT NULL UNIQUE,
+
+    -- 请求幂等号：客户端重试时应保持一致，避免重复下单
+    request_id VARCHAR(64) NOT NULL,
 
     -- 下单用户ID
     user_id BIGINT NOT NULL,
@@ -24,12 +26,63 @@ CREATE TABLE IF NOT EXISTS t_order (
     -- 记录最后更新时间
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
+    -- 幂等唯一约束：同一个request_id只能成功创建一笔订单
+    UNIQUE KEY uk_request_id (request_id),
+
     -- 常用查询索引：按用户维度查看订单列表
     INDEX idx_user_id (user_id),
 
     -- 常用查询索引：按创建时间倒序分页
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- noinspection SqlResolve
+-- 兼容本地已存在表结构：若历史表缺少request_id，则补齐字段和唯一索引
+SET @add_request_id_column_sql = (
+    SELECT IF(
+        EXISTS (
+            SELECT 1
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 't_order'
+              AND COLUMN_NAME = 'request_id'
+        ),
+        'SELECT 1',
+        'ALTER TABLE t_order ADD COLUMN request_id VARCHAR(64) NULL AFTER order_no'
+    )
+);
+PREPARE stmt_add_request_id FROM @add_request_id_column_sql;
+EXECUTE stmt_add_request_id;
+DEALLOCATE PREPARE stmt_add_request_id;
+
+-- noinspection SqlResolve
+-- 历史数据回填：若旧数据request_id为空，则回填为order_no，保证唯一性与可追踪性
+UPDATE t_order
+SET request_id = order_no
+WHERE request_id IS NULL OR request_id = '';
+
+-- noinspection SqlResolve
+-- 统一收敛为非空字段，避免后续写入脏数据
+ALTER TABLE t_order
+    MODIFY COLUMN request_id VARCHAR(64) NOT NULL;
+
+-- noinspection SqlResolve
+SET @add_request_id_index_sql = (
+    SELECT IF(
+        EXISTS (
+            SELECT 1
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 't_order'
+              AND INDEX_NAME = 'uk_request_id'
+        ),
+        'SELECT 1',
+        'ALTER TABLE t_order ADD UNIQUE KEY uk_request_id (request_id)'
+    )
+);
+PREPARE stmt_add_request_id_index FROM @add_request_id_index_sql;
+EXECUTE stmt_add_request_id_index;
+DEALLOCATE PREPARE stmt_add_request_id_index;
 
 -- ------------------------------------------------------------
 -- 订单明细表：一个订单可包含多个商品行

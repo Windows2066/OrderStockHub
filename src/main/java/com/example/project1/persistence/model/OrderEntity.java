@@ -20,6 +20,9 @@ public class OrderEntity {
     /** 业务订单号，用于幂等和跟踪。在整个系统中必须全局唯一。 */
     private String orderNo;
 
+    /** 请求幂等号。客户端重试时保持一致，用于防止重复下单。 */
+    private String requestId;
+
     /** 下单用户的ID。 */
     private Long userId;
 
@@ -74,6 +77,24 @@ public class OrderEntity {
      */
     public void setOrderNo(String orderNo) {
         this.orderNo = orderNo;
+    }
+
+    /**
+     * 获取请求幂等号。
+     *
+     * @return 请求幂等号
+     */
+    public String getRequestId() {
+        return requestId;
+    }
+
+    /**
+     * 设置请求幂等号。
+     *
+     * @param requestId 要设置的请求幂等号
+     */
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
     }
 
     /**

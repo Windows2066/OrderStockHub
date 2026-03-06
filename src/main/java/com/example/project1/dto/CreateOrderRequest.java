@@ -4,19 +4,31 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
 import java.util.List;
 
 /**
  * 创建订单请求DTO。
- *
+ * <p>
  * 该对象用于承接客户端传入的下单参数，
- * 包含下单用户ID和订单项列表。
+ * 包含请求幂等号、下单用户ID和订单项列表。
  */
 public class CreateOrderRequest {
+
+    /**
+     * 请求幂等号。
+     *
+     * 约定：同一次业务重试必须传相同requestId，
+     * 以便服务端识别重复请求并避免重复创建订单。
+     */
+    @NotBlank(message = "requestId不能为空")
+    @Size(max = 64, message = "requestId长度不能超过64")
+    private String requestId;
 
     /**
      * 下单用户ID。
@@ -31,6 +43,14 @@ public class CreateOrderRequest {
     @NotEmpty(message = "items不能为空")
     @Valid
     private List<OrderItemRequest> items;
+
+    public String getRequestId() {
+        return requestId;
+    }
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
+    }
 
     public Long getUserId() {
         return userId;
