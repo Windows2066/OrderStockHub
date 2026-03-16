@@ -10,15 +10,26 @@ import com.example.project1.persistence.model.OrderEntity;
 import com.example.project1.persistence.model.OutboxEventEntity;
 import com.example.project1.service.OrderService;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 @SpringBootTest
+@Tag("integration")
 class Project1ApplicationTests {
 
     @Autowired
@@ -120,6 +131,35 @@ class Project1ApplicationTests {
 
         int afterQty = inventoryMapper.selectBySkuCode("SKU-1001").getAvailableQty();
         Assertions.assertEquals(beforeQty, afterQty);
+    }
+
+    @Test
+    void createOrderShouldKeepIdempotentUnderConcurrency() throws InterruptedException, ExecutionException {
+        ensureInventoryAtLeast("SKU-1001", 2);
+        int beforeQty = inventoryMapper.selectBySkuCode("SKU-1001").getAvailableQty();
+
+        String requestId = "TEST-CONCURRENT-IDEMP-" + System.currentTimeMillis();
+        ExecutorService executorService = Executors.newFixedThreadPool(8);
+        List<Callable<OrderEntity>> tasks = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            tasks.add(() -> orderService.createOrder(buildSingleItemRequest(requestId, 1)));
+        }
+
+        List<Future<OrderEntity>> futures = executorService.invokeAll(tasks);
+        executorService.shutdown();
+        executorService.awaitTermination(10, TimeUnit.SECONDS);
+
+        Set<String> orderNos = new HashSet<>();
+        for (Future<OrderEntity> future : futures) {
+            OrderEntity order = future.get();
+            Assertions.assertNotNull(order);
+            orderNos.add(order.getOrderNo());
+        }
+
+        Assertions.assertEquals(1, orderNos.size());
+
+        int afterQty = inventoryMapper.selectBySkuCode("SKU-1001").getAvailableQty();
+        Assertions.assertEquals(beforeQty - 1, afterQty);
     }
 
     private CreateOrderRequest buildSingleItemRequest(String requestId, int quantity) {
