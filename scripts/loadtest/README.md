@@ -2,6 +2,8 @@
 
 该目录提供可直接执行的 PowerShell 压测脚本：`orders-loadtest.ps1`，并附带小规模与大规模一键入口。
 
+> 说明：`orders-loadtest.ps1` 已使用 `RunspacePool` 作为并发执行引擎（适配 Windows PowerShell 5.1），命令参数与 CSV 报告格式保持不变。
+
 ## 1. 前置条件
 
 - 后端应用已启动（默认 `http://127.0.0.1:8080`）

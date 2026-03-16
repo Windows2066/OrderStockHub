@@ -81,92 +81,135 @@ try {
     $startedAt = Get-Date
     $suiteSw = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # 使用 Start-Job + 节流实现并发，兼容 Windows PowerShell 5.1。
-    $jobs = @()
-    for ($i = 0; $i -lt $TotalRequests; $i++) {
-        while ((@($jobs | Where-Object { $_.State -eq 'Running' })).Count -ge $Concurrency) {
-            Start-Sleep -Milliseconds 50
+    # 使用 RunspacePool 并发执行请求，降低 Start-Job 在 PS5.1 下的进程开销。
+    $requestWorker = {
+        param(
+            [int]$Index,
+            [string]$OrdersUrl,
+            [string]$RequestId,
+            [long]$ReqUserId,
+            [long]$ReqProductId,
+            [int]$ReqQuantity,
+            [decimal]$ReqPrice,
+            [string]$JwtToken,
+            [int]$ReqTimeoutSeconds
+        )
+
+        Add-Type -AssemblyName System.Net.Http
+        $handler = New-Object System.Net.Http.HttpClientHandler
+        $localClient = New-Object System.Net.Http.HttpClient($handler)
+        $localClient.Timeout = [System.TimeSpan]::FromSeconds($ReqTimeoutSeconds)
+        $localClient.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $JwtToken)
+
+        $reqSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $httpCode = 0
+        $bizCode = -1
+        $bizMessage = ""
+        $orderNo = ""
+        $err = ""
+
+        try {
+            $orderPayload = @{
+                requestId = $RequestId
+                userId = $ReqUserId
+                items = @(@{ productId = $ReqProductId; quantity = $ReqQuantity; price = [decimal]::Round($ReqPrice, 2) })
+            } | ConvertTo-Json -Compress
+
+            $content = [System.Net.Http.StringContent]::new($orderPayload, [System.Text.Encoding]::UTF8, "application/json")
+            $resp = $localClient.PostAsync($OrdersUrl, $content).GetAwaiter().GetResult()
+            $httpCode = [int]$resp.StatusCode
+            $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+
+            if (-not [string]::IsNullOrWhiteSpace($body)) {
+                $json = $body | ConvertFrom-Json
+                if ($null -ne $json.code) { $bizCode = [int]$json.code }
+                if ($null -ne $json.message) { $bizMessage = [string]$json.message }
+                if ($null -ne $json.data -and $null -ne $json.data.orderNo) { $orderNo = [string]$json.data.orderNo }
+            }
+        } catch {
+            $err = $_.Exception.Message
+        } finally {
+            $reqSw.Stop()
+            if ($null -ne $localClient) { $localClient.Dispose() }
+            if ($null -ne $handler) { $handler.Dispose() }
         }
 
-        $requestId = if ([string]::IsNullOrWhiteSpace($FixedRequestId)) {
-            "LT-$runId-$i-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-        } else {
-            $FixedRequestId
+        $ok = ($httpCode -eq 200 -and $bizCode -eq 0)
+        [pscustomobject]@{
+            index = $Index
+            requestId = $RequestId
+            httpCode = $httpCode
+            bizCode = $bizCode
+            bizMessage = $bizMessage
+            orderNo = $orderNo
+            elapsedMs = $reqSw.ElapsedMilliseconds
+            success = $ok
+            error = $err
+        }
+    }
+
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, $Concurrency)
+    $pool.Open()
+
+    $pending = New-Object System.Collections.Generic.List[object]
+    try {
+        for ($i = 0; $i -lt $TotalRequests; $i++) {
+            $requestId = if ([string]::IsNullOrWhiteSpace($FixedRequestId)) {
+                "LT-$runId-$i-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+            } else {
+                $FixedRequestId
+            }
+
+            $ps = [PowerShell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddScript($requestWorker.ToString())
+            [void]$ps.AddArgument($i)
+            [void]$ps.AddArgument($ordersUrl)
+            [void]$ps.AddArgument($requestId)
+            [void]$ps.AddArgument($UserId)
+            [void]$ps.AddArgument($ProductId)
+            [void]$ps.AddArgument($Quantity)
+            [void]$ps.AddArgument($Price)
+            [void]$ps.AddArgument($token)
+            [void]$ps.AddArgument($TimeoutSeconds)
+
+            $handle = $ps.BeginInvoke()
+            $pending.Add([pscustomobject]@{
+                index = $i
+                requestId = $requestId
+                ps = $ps
+                handle = $handle
+            })
         }
 
-        $jobs += Start-Job -ScriptBlock {
-            param(
-                [int]$Index,
-                [string]$OrdersUrl,
-                [string]$RequestId,
-                [long]$ReqUserId,
-                [long]$ReqProductId,
-                [int]$ReqQuantity,
-                [decimal]$ReqPrice,
-                [string]$JwtToken,
-                [int]$ReqTimeoutSeconds
-            )
-
-            Add-Type -AssemblyName System.Net.Http
-            $handler = New-Object System.Net.Http.HttpClientHandler
-            $localClient = New-Object System.Net.Http.HttpClient($handler)
-            $localClient.Timeout = [System.TimeSpan]::FromSeconds($ReqTimeoutSeconds)
-            $localClient.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $JwtToken)
-
-            $reqSw = [System.Diagnostics.Stopwatch]::StartNew()
-            $httpCode = 0
-            $bizCode = -1
-            $bizMessage = ""
-            $orderNo = ""
-            $err = ""
-
+        foreach ($task in $pending) {
             try {
-                $orderPayload = @{
-                    requestId = $RequestId
-                    userId = $ReqUserId
-                    items = @(@{ productId = $ReqProductId; quantity = $ReqQuantity; price = [decimal]::Round($ReqPrice, 2) })
-                } | ConvertTo-Json -Compress
-
-                $content = [System.Net.Http.StringContent]::new($orderPayload, [System.Text.Encoding]::UTF8, "application/json")
-                $resp = $localClient.PostAsync($OrdersUrl, $content).GetAwaiter().GetResult()
-                $httpCode = [int]$resp.StatusCode
-                $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-
-                if (-not [string]::IsNullOrWhiteSpace($body)) {
-                    $json = $body | ConvertFrom-Json
-                    if ($null -ne $json.code) { $bizCode = [int]$json.code }
-                    if ($null -ne $json.message) { $bizMessage = [string]$json.message }
-                    if ($null -ne $json.data -and $null -ne $json.data.orderNo) { $orderNo = [string]$json.data.orderNo }
+                $taskResults = $task.ps.EndInvoke($task.handle)
+                foreach ($taskResult in $taskResults) {
+                    $results.Add($taskResult)
                 }
             } catch {
-                $err = $_.Exception.Message
+                $results.Add([pscustomobject]@{
+                    index = $task.index
+                    requestId = $task.requestId
+                    httpCode = 0
+                    bizCode = -1
+                    bizMessage = ""
+                    orderNo = ""
+                    elapsedMs = 0
+                    success = $false
+                    error = $_.Exception.Message
+                })
             } finally {
-                $reqSw.Stop()
-                if ($null -ne $localClient) { $localClient.Dispose() }
-                if ($null -ne $handler) { $handler.Dispose() }
+                $task.ps.Dispose()
             }
-
-            $ok = ($httpCode -eq 200 -and $bizCode -eq 0)
-            [pscustomobject]@{
-                index = $Index
-                requestId = $RequestId
-                httpCode = $httpCode
-                bizCode = $bizCode
-                bizMessage = $bizMessage
-                orderNo = $orderNo
-                elapsedMs = $reqSw.ElapsedMilliseconds
-                success = $ok
-                error = $err
-            }
-        } -ArgumentList $i, $ordersUrl, $requestId, $UserId, $ProductId, $Quantity, $Price, $token, $TimeoutSeconds
+        }
+    } finally {
+        if ($null -ne $pool) {
+            $pool.Close()
+            $pool.Dispose()
+        }
     }
-
-    Wait-Job -Job $jobs | Out-Null
-    $jobResults = Receive-Job -Job $jobs
-    foreach ($jobResult in $jobResults) {
-        $results.Add($jobResult)
-    }
-    Remove-Job -Job $jobs | Out-Null
 
     $suiteSw.Stop()
     $endedAt = Get-Date
