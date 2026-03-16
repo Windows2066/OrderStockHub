@@ -7,96 +7,122 @@ import com.example.project1.persistence.mapper.InventoryLogMapper;
 import com.example.project1.persistence.mapper.InventoryMapper;
 import com.example.project1.persistence.mapper.OrderItemMapper;
 import com.example.project1.persistence.mapper.OrderMapper;
+import com.example.project1.persistence.mapper.OutboxEventMapper;
 import com.example.project1.persistence.model.InventoryEntity;
 import com.example.project1.persistence.model.InventoryLogEntity;
 import com.example.project1.persistence.model.OrderEntity;
 import com.example.project1.persistence.model.OrderItemEntity;
+import com.example.project1.persistence.model.OutboxEventEntity;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 订单业务服务。
  *
  * 该服务负责实现完整下单链路：
- * 1. 请求幂等校验，避免重复下单
- * 2. 创建订单主记录
- * 3. 创建订单明细记录
- * 4. 扣减库存（防超卖）
- * 5. 写入库存流水
+ * 1. 幂等与并发控制（Redisson + 唯一索引）
+ * 2. 创建订单主记录与明细
+ * 3. 扣减库存（防超卖）
+ * 4. 写入库存流水
+ * 5. 同事务写入 Outbox 事件
  */
 @Service
 public class OrderService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
-    /**
-     * 订单主表Mapper。
-     */
     private final OrderMapper orderMapper;
-
-    /**
-     * 订单明细表Mapper。
-     */
     private final OrderItemMapper orderItemMapper;
-
-    /**
-     * 库存表Mapper。
-     */
     private final InventoryMapper inventoryMapper;
-
-    /**
-     * 库存流水表Mapper。
-     */
     private final InventoryLogMapper inventoryLogMapper;
+    private final OutboxEventMapper outboxEventMapper;
+    private final RedissonClient redissonClient;
+    private final ObjectMapper objectMapper;
+
+    @Value("${app.rocketmq.order-topic:order-created-topic}")
+    private String orderCreatedTopic;
+
+    @Value("${app.rocketmq.order-tags:created}")
+    private String orderCreatedTags;
+
+    @Value("${app.redis.lock.order-create.prefix:lock:order:create:}")
+    private String orderCreateLockPrefix;
+
+    @Value("${app.redis.lock.order-create.wait-seconds:2}")
+    private long orderCreateLockWaitSeconds;
+
+    @Value("${app.redis.lock.order-create.lease-seconds:10}")
+    private long orderCreateLockLeaseSeconds;
 
     public OrderService(OrderMapper orderMapper,
                         OrderItemMapper orderItemMapper,
                         InventoryMapper inventoryMapper,
-                        InventoryLogMapper inventoryLogMapper) {
+                        InventoryLogMapper inventoryLogMapper,
+                        OutboxEventMapper outboxEventMapper,
+                        RedissonClient redissonClient,
+                        ObjectMapper objectMapper) {
         this.orderMapper = orderMapper;
         this.orderItemMapper = orderItemMapper;
         this.inventoryMapper = inventoryMapper;
         this.inventoryLogMapper = inventoryLogMapper;
+        this.outboxEventMapper = outboxEventMapper;
+        this.redissonClient = redissonClient;
+        this.objectMapper = objectMapper;
     }
 
     /**
-     * 创建订单（下单+扣库存+库存流水）。
-     *
-     * 该方法使用事务保证原子性：任意一步失败都会回滚，避免出现
-     * "订单已创建但库存未扣减" 或 "库存扣减了但订单未落库" 的不一致状态。
-     *
-     * @param request 下单请求参数
-     * @return 创建后的订单主记录
+     * 创建订单（下单+扣库存+库存流水+Outbox）。
      */
     @Transactional(rollbackFor = Exception.class)
     public OrderEntity createOrder(CreateOrderRequest request) {
         String requestId = request.getRequestId();
+        String lockKey = orderCreateLockPrefix + requestId;
+        RLock lock = redissonClient.getLock(lockKey);
 
-        // 先做幂等查询：若同一requestId已成功下单，直接返回历史结果。
-        OrderEntity existed = orderMapper.selectByRequestId(requestId);
-        if (existed != null) {
-            log.info("幂等命中，直接返回已有订单，requestId={}, orderNo={}", requestId, existed.getOrderNo());
-            return existed;
+        boolean locked;
+        try {
+            // 先尝试获取 requestId 级分布式锁，避免并发重复下单穿透到数据库层。
+            locked = lock.tryLock(orderCreateLockWaitSeconds, orderCreateLockLeaseSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+            log.warn("下单获取分布式锁被中断，requestId={}, lockKey={}", requestId, lockKey);
+            throw new BusinessException(4301, "系统繁忙，请稍后重试");
         }
 
-        // 业务订单号采用UUID，避免高并发下毫秒时间戳重复。
+        if (!locked) {
+            log.warn("下单获取分布式锁失败，requestId={}, lockKey={}, waitSeconds={}, leaseSeconds={}",
+                    requestId, lockKey, orderCreateLockWaitSeconds, orderCreateLockLeaseSeconds);
+            throw new BusinessException(4302, "请求处理中，请勿重复提交");
+        }
+
         String orderNo = "ORD" + UUID.randomUUID().toString().replace("-", "");
         try {
-            // 汇总订单总金额 = sum(单价 * 数量)。
+            OrderEntity existed = orderMapper.selectByRequestId(requestId);
+            if (existed != null) {
+                log.info("幂等命中，直接返回已有订单，requestId={}, orderNo={}", requestId, existed.getOrderNo());
+                return existed;
+            }
+
             BigDecimal totalAmount = request.getItems().stream()
                     .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-            // 先写入订单主表，依赖request_id唯一约束兜底并发幂等。
             OrderEntity order = new OrderEntity();
             order.setOrderNo(orderNo);
             order.setRequestId(requestId);
@@ -106,23 +132,19 @@ public class OrderService {
             try {
                 orderMapper.insert(order);
             } catch (DuplicateKeyException duplicateKeyException) {
-                // 并发重复请求时，唯一索引会拦截；此时返回已存在订单。
                 OrderEntity duplicatedOrder = orderMapper.selectByRequestId(requestId);
                 if (duplicatedOrder != null) {
                     log.info("并发幂等命中，返回已存在订单，requestId={}, orderNo={}", requestId, duplicatedOrder.getOrderNo());
                     return duplicatedOrder;
                 }
-                log.error("订单插入触发唯一约束但未查到历史订单，requestId={}, 异常={}", requestId, duplicateKeyException.getMessage(), duplicateKeyException);
                 throw duplicateKeyException;
             }
 
-            // 组装并批量写入订单明细。
             List<OrderItemEntity> orderItems = new ArrayList<>();
             for (CreateOrderRequest.OrderItemRequest item : request.getItems()) {
                 OrderItemEntity orderItem = new OrderItemEntity();
                 orderItem.setOrderId(order.getId());
                 orderItem.setSkuCode(buildSkuCode(item.getProductId()));
-                // 当前阶段没有独立商品中心，名称先用“商品+ID”做快照占位。
                 orderItem.setSkuName("商品" + item.getProductId());
                 orderItem.setPrice(item.getPrice());
                 orderItem.setQuantity(item.getQuantity());
@@ -130,33 +152,22 @@ public class OrderService {
             }
             orderItemMapper.batchInsert(orderItems);
 
-            // 为降低多SKU并发死锁概率，按productId升序处理库存扣减。
             List<CreateOrderRequest.OrderItemRequest> sortedItems = new ArrayList<>(request.getItems());
             sortedItems.sort(Comparator.comparing(CreateOrderRequest.OrderItemRequest::getProductId));
 
-            // 逐项扣库存并写库存流水，确保每个SKU都有可追溯记录。
             for (CreateOrderRequest.OrderItemRequest item : sortedItems) {
                 String skuCode = buildSkuCode(item.getProductId());
-
-                // 在事务中对库存行加锁，保证读取快照与后续扣减一致。
                 InventoryEntity inventory = inventoryMapper.selectBySkuCodeForUpdate(skuCode);
                 if (inventory == null) {
-                    log.warn("下单失败，库存不存在，orderNo={}, skuCode={}", orderNo, skuCode);
                     throw new BusinessException(4101, "商品" + skuCode + "库存不存在");
                 }
                 if (inventory.getAvailableQty() < item.getQuantity()) {
-                    log.warn("下单失败，库存不足，orderNo={}, skuCode={}, beforeQty={}, needQty={}",
-                            orderNo, skuCode, inventory.getAvailableQty(), item.getQuantity());
                     throw new BusinessException(4102, "商品" + skuCode + "库存不足");
                 }
 
                 int beforeQty = inventory.getAvailableQty();
-
-                // 防超卖SQL：仅在available_qty >= 扣减数量时才更新成功。
                 int updated = inventoryMapper.deductAvailable(skuCode, item.getQuantity());
                 if (updated == 0) {
-                    log.warn("下单失败，条件扣减未命中，判定库存不足，orderNo={}, skuCode={}, beforeQty={}, needQty={}",
-                            orderNo, skuCode, beforeQty, item.getQuantity());
                     throw new BusinessException(4102, "商品" + skuCode + "库存不足");
                 }
 
@@ -164,7 +175,6 @@ public class OrderService {
                 log.info("库存扣减成功，orderNo={}, skuCode={}, beforeQty={}, deductQty={}, afterQty={}",
                         orderNo, skuCode, beforeQty, item.getQuantity(), afterQty);
 
-                // 写库存流水。change_qty按表设计使用正数，变更方向由change_type表达。
                 InventoryLogEntity inventoryLog = new InventoryLogEntity();
                 inventoryLog.setBizNo(orderNo);
                 inventoryLog.setSkuCode(skuCode);
@@ -175,6 +185,18 @@ public class OrderService {
                 inventoryLog.setRemark("下单扣减库存");
                 inventoryLogMapper.insert(inventoryLog);
             }
+
+            // 下单事务内写 Outbox，确保业务数据与待发送事件一起提交。
+            OutboxEventEntity outboxEvent = new OutboxEventEntity();
+            outboxEvent.setEventType("ORDER_CREATED");
+            outboxEvent.setBizKey(orderNo);
+            outboxEvent.setTopic(orderCreatedTopic);
+            outboxEvent.setTags(orderCreatedTags);
+            outboxEvent.setPayload(buildOrderCreatedPayload(order, request));
+            outboxEvent.setStatus(0);
+            outboxEvent.setRetryCount(0);
+            outboxEvent.setNextRetryAt(LocalDateTime.now());
+            outboxEventMapper.insert(outboxEvent);
 
             log.info("下单成功，requestId={}, orderNo={}, userId={}, itemCount={}",
                     requestId, orderNo, request.getUserId(), request.getItems().size());
@@ -187,15 +209,13 @@ public class OrderService {
             log.error("下单系统异常，requestId={}, orderNo={}, 原因={}",
                     requestId, orderNo, exception.getMessage(), exception);
             throw exception;
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
-    /**
-     * 查询订单详情（订单主信息 + 订单项）。
-     *
-     * @param orderNo 业务订单号
-     * @return 聚合后的订单详情
-     */
     @Transactional(readOnly = true)
     public OrderDetailResponse getOrderDetail(String orderNo) {
         OrderEntity order = orderMapper.selectByOrderNo(orderNo);
@@ -209,12 +229,6 @@ public class OrderService {
         return response;
     }
 
-    /**
-     * 按商品ID查询库存。
-     *
-     * @param productId 商品ID
-     * @return 库存信息
-     */
     @Transactional(readOnly = true)
     public InventoryEntity getInventoryByProductId(Long productId) {
         String skuCode = buildSkuCode(productId);
@@ -225,13 +239,21 @@ public class OrderService {
         return inventory;
     }
 
-    /**
-     * 统一构造库存SKU编码。
-     *
-     * 数据库初始化脚本使用格式：SKU-1001，
-     * 因此这里也统一按SKU-商品ID拼接，避免查询不到库存。
-     */
     private String buildSkuCode(Long productId) {
         return "SKU-" + productId;
+    }
+
+    private String buildOrderCreatedPayload(OrderEntity order, CreateOrderRequest request) {
+        try {
+            return objectMapper.writeValueAsString(new OrderCreatedPayload(order.getOrderNo(), request.getRequestId(), order.getUserId(), order.getTotalAmount()));
+        } catch (JsonProcessingException jsonProcessingException) {
+            throw new BusinessException(4303, "订单事件序列化失败");
+        }
+    }
+
+    /**
+     * 订单创建事件最小载荷。
+     */
+    private record OrderCreatedPayload(String orderNo, String requestId, Long userId, BigDecimal totalAmount) {
     }
 }

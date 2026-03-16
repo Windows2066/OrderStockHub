@@ -36,6 +36,31 @@ services:
       NACOS_AUTH_ENABLE: "false"
     ports:
       - "8848:8848"
+      - "9848:9848"
+      - "9849:9849"
+
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.1.4
+    container_name: mall-rocketmq-namesrv
+    restart: unless-stopped
+    ports:
+      - "9876:9876"
+    command: sh mqnamesrv
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.1.4
+    container_name: mall-rocketmq-broker
+    restart: unless-stopped
+    depends_on:
+      - rocketmq-namesrv
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+    volumes:
+      - ./rocketmq/broker.conf:/home/rocketmq/rocketmq-5.1.4/conf/broker.conf
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/rocketmq-5.1.4/conf/broker.conf
 
 volumes:
   mysql_data:

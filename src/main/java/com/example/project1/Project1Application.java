@@ -2,6 +2,7 @@ package com.example.project1;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 电商订单与库存管理系统的主应用类。
@@ -16,6 +17,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * 此设置使应用能够以最小的配置运行，利用Spring Boot的约定优于配置方法。
  */
 @SpringBootApplication
+@EnableScheduling
 public class Project1Application {
 
     /**
