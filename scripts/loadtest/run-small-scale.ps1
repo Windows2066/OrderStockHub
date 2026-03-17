@@ -1,5 +1,6 @@
 param(
     [string]$BaseUrl = "http://127.0.0.1:8080",
+    [string]$ProductIds = "1001,1002,1003,1004,1005",
     [switch]$DryRun
 )
 
@@ -26,7 +27,7 @@ powershell -ExecutionPolicy Bypass -File (Join-Path $scriptDir "orders-loadtest.
     -BaseUrl $BaseUrl `
     -TotalRequests 200 `
     -Concurrency 20 `
-    -ProductId 1001 `
+    -ProductIds $ProductIds `
     -Quantity 1 `
     -Price 9.90 `
     -ReportPath $report `

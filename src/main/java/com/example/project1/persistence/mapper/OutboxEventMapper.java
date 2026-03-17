@@ -57,6 +57,22 @@ public interface OutboxEventMapper {
         """)
     int markPublished(@Param("id") Long id);
 
+    @Update({
+        "<script>",
+        "UPDATE t_outbox_event",
+        "SET status = 1,",
+        "    retry_count = 0,",
+        "    next_retry_at = NULL,",
+        "    last_error = NULL,",
+        "    updated_at = NOW()",
+        "WHERE id IN",
+        "<foreach collection='ids' item='id' open='(' separator=',' close=')'>",
+        "#{id}",
+        "</foreach>",
+        "</script>"
+    })
+    int markPublishedBatch(@Param("ids") List<Long> ids);
+
     @Update("""
         UPDATE t_outbox_event
         SET status = 2,

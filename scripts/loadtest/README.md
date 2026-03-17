@@ -49,6 +49,23 @@ powershell -ExecutionPolicy Bypass -File .\run-large-scale.ps1
 
 默认参数：`5000` 请求、`200` 并发。
 
+## 4.1 热点 SKU 压测（300 QPS / 5 分钟）
+
+用于模拟更贴近真实业务的热点分布流量：
+
+- 总 SKU：`6000`
+- 在售 SKU：`1200`
+- 极热点 SKU：`2`（请求占比 `20%`）
+- 热门 SKU：`50`（请求占比 `70%`，不含极热点 2 个）
+- 其余在售 SKU：`1148`（请求占比 `10%`）
+
+```powershell
+cd F:\mianshi\project1\scripts\loadtest
+powershell -ExecutionPolicy Bypass -File .\run-hotspot-300qps.ps1
+```
+
+默认即为：`300 QPS`、`5 分钟`、`200 并发`，报告输出到 `scripts/loadtest/reports`。
+
 ## 5. 幂等压测（固定 requestId）
 
 该模式用于验证重复请求防重逻辑（理论上只应创建 1 笔订单）。
@@ -64,9 +81,17 @@ powershell -ExecutionPolicy Bypass -File .\orders-loadtest.ps1 -TotalRequests 50
 - `-Username/-Password`：登录账号密码，默认 `admin/admin123`
 - `-TotalRequests`：总请求数
 - `-Concurrency`：并发数
-- `-ProductId/-Quantity/-Price`：下单商品参数
+- `-ProductId/-Quantity/-Price`：单 SKU 下单参数
+- `-ProductIds`：多 SKU 压测参数，逗号分隔（如 `1001,1002,1003`），传入后会轮询使用
 - `-TimeoutSeconds`：单请求超时秒数
 - `-ReportPath`：CSV 报告输出路径（不传则输出到 `scripts/loadtest/reports`）
+
+多 SKU 压测示例：
+
+```powershell
+cd F:\mianshi\project1\scripts\loadtest
+powershell -ExecutionPolicy Bypass -File .\orders-loadtest.ps1 -TotalRequests 1000 -Concurrency 100 -ProductIds "1001,1002,1003,1004,1005" -Quantity 1 -Price 9.90
+```
 
 ## 7. 输出说明
 

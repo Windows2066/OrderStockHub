@@ -9,6 +9,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -38,24 +39,46 @@ public class OutboxRelayService {
 
     @Scheduled(fixedDelayString = "${app.outbox.relay-fixed-delay-ms:5000}")
     public void relayPendingEvents() {
+        long startedAtNanos = System.nanoTime();
         List<OutboxEventEntity> events = outboxEventMapper.selectPending(relayBatchSize);
         if (events.isEmpty()) {
             return;
         }
 
+        List<Long> publishedIds = new ArrayList<>(events.size());
+        int failedCount = 0;
+
         for (OutboxEventEntity event : events) {
             try {
                 boolean published = orderEventPublisher.publish(event.getTopic(), event.getTags(), event.getBizKey(), event.getPayload());
                 if (published) {
-                    outboxEventMapper.markPublished(event.getId());
-                    log.info("Outbox 发送成功，eventId={}, bizKey={}", event.getId(), event.getBizKey());
+                    publishedIds.add(event.getId());
                 } else {
                     markFailed(event, "发布器返回失败");
+                    failedCount++;
                 }
             } catch (Exception ex) {
                 markFailed(event, ex.getMessage());
+                failedCount++;
             }
         }
+
+        if (!publishedIds.isEmpty()) {
+            try {
+                outboxEventMapper.markPublishedBatch(publishedIds);
+            } catch (Exception ex) {
+                // 批量更新异常时退化为逐条更新，避免已发送消息长期处于待发送状态。
+                log.warn("Outbox 批量更新已发送状态失败，回退逐条更新，count={}, reason={}", publishedIds.size(), ex.getMessage());
+                for (Long id : publishedIds) {
+                    outboxEventMapper.markPublished(id);
+                }
+            }
+        }
+
+        long elapsedMs = (System.nanoTime() - startedAtNanos) / 1_000_000;
+        double throughput = elapsedMs > 0 ? (events.size() * 1000.0) / elapsedMs : events.size();
+        log.info("Outbox 扫描完成，total={}, success={}, failed={}, elapsedMs={}, throughput={}",
+                events.size(), publishedIds.size(), failedCount, elapsedMs, String.format("%.2f", throughput));
     }
 
     private void markFailed(OutboxEventEntity event, String message) {

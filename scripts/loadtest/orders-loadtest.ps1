@@ -6,6 +6,7 @@
     [int]$Concurrency = 20,
     [long]$UserId = 1,
     [long]$ProductId = 1001,
+    [string]$ProductIds = "",
     [int]$Quantity = 1,
     [decimal]$Price = 9.90,
     [string]$FixedRequestId = "",
@@ -25,6 +26,26 @@ if ($Concurrency -le 0) { throw "Concurrency must be > 0" }
 if ($Quantity -le 0) { throw "Quantity must be > 0" }
 if ($TimeoutSeconds -le 0) { throw "TimeoutSeconds must be > 0" }
 
+$productIdList = New-Object System.Collections.Generic.List[long]
+if ([string]::IsNullOrWhiteSpace($ProductIds)) {
+    $productIdList.Add($ProductId)
+} else {
+    foreach ($token in $ProductIds.Split(',')) {
+        $trimmed = $token.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+        $parsed = 0L
+        if (-not [long]::TryParse($trimmed, [ref]$parsed) -or $parsed -le 0) {
+            throw "Invalid ProductIds token: $trimmed"
+        }
+        $productIdList.Add($parsed)
+    }
+    if ($productIdList.Count -eq 0) {
+        throw "ProductIds must contain at least one valid product id"
+    }
+}
+
 $runId = Get-Date -Format "yyyyMMdd-HHmmss"
 $ordersUrl = "$BaseUrl/orders"
 $loginUrl = "$BaseUrl/auth/login"
@@ -35,7 +56,7 @@ if ($DryRun) {
     Write-Host "[DryRun] Load test config:"
     Write-Host "  BaseUrl=$BaseUrl"
     Write-Host "  TotalRequests=$TotalRequests, Concurrency=$Concurrency"
-    Write-Host "  UserId=$UserId, ProductId=$ProductId, Quantity=$Quantity, Price=$Price"
+    Write-Host "  UserId=$UserId, ProductIds=$($productIdList -join '/'), Quantity=$Quantity, Price=$Price"
     if ([string]::IsNullOrWhiteSpace($FixedRequestId)) {
         Write-Host "  requestId mode=unique per request"
     } else {
@@ -138,6 +159,7 @@ try {
         [pscustomobject]@{
             index = $Index
             requestId = $RequestId
+            productId = $ReqProductId
             httpCode = $httpCode
             bizCode = $bizCode
             bizMessage = $bizMessage
@@ -154,6 +176,7 @@ try {
     $pending = New-Object System.Collections.Generic.List[object]
     try {
         for ($i = 0; $i -lt $TotalRequests; $i++) {
+            $selectedProductId = $productIdList[$i % $productIdList.Count]
             $requestId = if ([string]::IsNullOrWhiteSpace($FixedRequestId)) {
                 "LT-$runId-$i-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
             } else {
@@ -167,7 +190,7 @@ try {
             [void]$ps.AddArgument($ordersUrl)
             [void]$ps.AddArgument($requestId)
             [void]$ps.AddArgument($UserId)
-            [void]$ps.AddArgument($ProductId)
+            [void]$ps.AddArgument($selectedProductId)
             [void]$ps.AddArgument($Quantity)
             [void]$ps.AddArgument($Price)
             [void]$ps.AddArgument($token)
@@ -177,6 +200,7 @@ try {
             $pending.Add([pscustomobject]@{
                 index = $i
                 requestId = $requestId
+                productId = $selectedProductId
                 ps = $ps
                 handle = $handle
             })
@@ -192,6 +216,7 @@ try {
                 $results.Add([pscustomobject]@{
                     index = $task.index
                     requestId = $task.requestId
+                    productId = $task.productId
                     httpCode = 0
                     bizCode = -1
                     bizMessage = ""
@@ -251,7 +276,7 @@ try {
         Write-Host ""
         Write-Host "---- Failed samples (top 10) ----"
         $failedRows |
-            Select-Object -First 10 index, requestId, httpCode, bizCode, bizMessage, error, elapsedMs |
+            Select-Object -First 10 index, requestId, productId, httpCode, bizCode, bizMessage, error, elapsedMs |
             Format-Table -AutoSize |
             Out-String |
             Write-Host

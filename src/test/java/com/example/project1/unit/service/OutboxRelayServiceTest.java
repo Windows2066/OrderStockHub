@@ -14,6 +14,7 @@ import org.springframework.core.env.Environment;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -43,7 +44,22 @@ class OutboxRelayServiceTest {
         OutboxRelayService relayService = new OutboxRelayService(outboxEventMapper, orderEventPublisher, environment);
         relayService.relayPendingEvents();
 
-        verify(outboxEventMapper).markPublished(1L);
+        verify(outboxEventMapper).markPublishedBatch(ArgumentMatchers.eq(List.of(1L)));
+    }
+
+    @Test
+    void shouldFallbackToSingleUpdateWhenBatchUpdateFails() {
+        when(environment.getProperty("app.outbox.relay-batch-size", "20")).thenReturn("20");
+
+        OutboxEventEntity event = buildEvent(3L, "BIZ-BATCH-FALLBACK", 0);
+        when(outboxEventMapper.selectPending(20)).thenReturn(List.of(event));
+        when(orderEventPublisher.publish(event.getTopic(), event.getTags(), event.getBizKey(), event.getPayload())).thenReturn(true);
+        when(outboxEventMapper.markPublishedBatch(anyList())).thenThrow(new RuntimeException("batch sql error"));
+
+        OutboxRelayService relayService = new OutboxRelayService(outboxEventMapper, orderEventPublisher, environment);
+        relayService.relayPendingEvents();
+
+        verify(outboxEventMapper).markPublished(3L);
     }
 
     @Test
